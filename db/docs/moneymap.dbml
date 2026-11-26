@@ -1,0 +1,982 @@
+Table ai.calls [headercolor: #C026D3] {
+  id uuid [not null]
+  created_at "timestamp with time zone" [not null]
+  task text [not null]
+  model_code text [not null]
+  route_position "smallint" [not null]
+  attempt "smallint" [not null]
+  status text [not null]
+  user_id uuid
+  voice_entry_id uuid
+  voice_entry_created_at "timestamp with time zone"
+  latency_ms "integer"
+  audio_seconds "numeric(6,2)"
+  input_tokens "integer"
+  cached_input_tokens "integer"
+  output_tokens "integer"
+  cost_usd "numeric(12,6)"
+  indexes {
+    (created_at, id) [pk]
+  }
+  Note: 'Cada llamada a un proveedor de IA, exitosa o no: estado, latencia, tokens o audio y costo. El detalle de un error va a ops.logs. Particionada por mes. Quién escribe: el worker (solo inserta). Ejemplo: DeepSeek extrajo en 1.400 ms con 800/100 tokens, 0,00036 USD.'
+}
+
+Table ai.models [headercolor: #C026D3] {
+  code text [pk]
+  provider text [not null]
+  model text [not null]
+  kind text [not null]
+  price_per_minute_usd "numeric(12,6)"
+  min_billed_seconds "numeric(6,2)" [not null]
+  input_per_mtok_usd "numeric(12,6)"
+  cached_input_per_mtok_usd "numeric(12,6)"
+  output_per_mtok_usd "numeric(12,6)"
+  is_active "boolean" [not null]
+  shutdown_on date
+  prices_checked_on date [not null]
+  notes text
+  created_at "timestamp with time zone" [not null]
+  updated_at "timestamp with time zone" [not null]
+  Note: 'Modelos de IA disponibles con su precio. Agregar un proveedor es un INSERT aquí y una ruta. Quién escribe: el equipo. Ejemplo: openai.gpt-transcribe, 0,0045 USD por minuto.'
+}
+
+Table ai.route_changes [headercolor: #C026D3] {
+  id "bigint" [pk]
+  task text [not null]
+  changed_at "timestamp with time zone" [not null]
+  changed_by text [not null]
+  old_order "text[]" [not null]
+  new_order "text[]" [not null]
+  reason text
+  Note: 'Historial de cambios del orden de proveedores: quién, cuándo, el orden anterior, el nuevo y el motivo. Quién escribe: ai.set_route_order(). Ejemplo: Dana puso a DeepSeek de principal por timeouts de OpenAI.'
+}
+
+Table ai.routes [headercolor: #C026D3] {
+  task text [not null]
+  "position" "smallint" [not null]
+  model_code text [not null]
+  is_active "boolean" [not null]
+  timeout_ms "integer" [not null]
+  max_retries "smallint" [not null]
+  updated_at "timestamp with time zone" [not null]
+  indexes {
+    (task, "position") [pk]
+  }
+  Note: 'Orden de proveedores por tarea: posición 1 = principal, 2+ = respaldos, con tiempo límite y reintentos. Quién escribe: el equipo con ai.set_route_order(). Ejemplo: voice.extract → 1 GPT-6 Luna, 2 DeepSeek, 3 Claude Haiku.'
+}
+
+Table ai.tasks [headercolor: #C026D3] {
+  key text [pk]
+  model_kind text [not null]
+  description text [not null]
+  Note: 'Pasos que hace la IA. Una tarea nueva (por ejemplo leer facturas) es una fila más. Quién escribe: el equipo. Ejemplo: voice.transcribe (voz a texto) y voice.extract (frase a movimiento).'
+}
+
+Table ai.usage_monthly [headercolor: #C026D3] {
+  user_id uuid [not null]
+  period date [not null]
+  task text [not null]
+  calls "integer" [not null]
+  failed_calls "integer" [not null]
+  audio_seconds "numeric(12,2)" [not null]
+  input_tokens "bigint" [not null]
+  output_tokens "bigint" [not null]
+  cost_usd "numeric(14,6)" [not null]
+  updated_at "timestamp with time zone" [not null]
+  indexes {
+    (user_id, period, task) [pk]
+  }
+  Note: 'Uso de IA por usuario, mes y tarea: llamadas, fallas, audio, tokens y costo. Permite contar cuánto usa y cuánto cuesta cada usuario sin recorrer ai.calls. Quién escribe: un trigger de ai.calls. Ejemplo: María, octubre, voice.extract: 24 llamadas, 1 fallida, 0,0086 USD.'
+}
+
+Table ai.voice_entries [headercolor: #C026D3] {
+  id uuid [not null]
+  created_at "timestamp with time zone" [not null]
+  user_id uuid [not null]
+  input_type text [not null]
+  status text [not null]
+  audio_seconds "numeric(6,2)"
+  audio_object_key text
+  transcript text
+  stt_model_code text
+  llm_model_code text
+  prompt_version text
+  extraction jsonb
+  confidence "numeric(4,3)"
+  attempts "smallint" [not null]
+  fallback_used "boolean" [not null]
+  input_tokens "integer" [not null]
+  output_tokens "integer" [not null]
+  cost_usd "numeric(12,6)" [not null]
+  latency_ms "integer"
+  transaction_id uuid
+  error text
+  confirmed_at "timestamp with time zone"
+  indexes {
+    (created_at, id) [pk]
+  }
+  Note: 'Cada dictado (o frase escrita) y su resultado: transcripción, movimiento extraído, modelos que respondieron, intentos y costo. Particionada por mes. Quién escribe: la API lo crea; el worker y los triggers de ai.calls lo completan. Ejemplo: \'gasté 50 en comida\' → gasto de 50 BOB en Restaurantes, confirmado.'
+}
+
+Table billing.features [headercolor: #7C3AED] {
+  key text [pk]
+  description text [not null]
+  value_type text [not null]
+  limit_period text
+  Note: 'Funcionalidades que un plan habilita o limita. total = recursos vivos (tarjetas, monedas, metas); month = usos en el mes (dictados, consultas). Quién escribe: el equipo. Ejemplo: finance.cards (límite total), ai.voice_entries (límite al mes).'
+}
+
+Table billing.payments [headercolor: #7C3AED] {
+  id uuid [pk]
+  user_id uuid [not null]
+  subscription_id uuid
+  plan_price_id uuid
+  provider text [not null]
+  provider_transaction_id text [not null]
+  kind text [not null]
+  status text [not null]
+  amount "numeric(12,2)" [not null]
+  currency "character(3)" [not null]
+  billing_period text
+  period_start "timestamp with time zone"
+  period_end "timestamp with time zone"
+  store_fee "numeric(12,2)"
+  occurred_at "timestamp with time zone" [not null]
+  created_at "timestamp with time zone" [not null]
+  Note: 'Cada cobro, renovación o reembolso informado por las tiendas. La clave (provider, provider_transaction_id) evita registrar dos veces el mismo cobro. Quién escribe: los workers. Ejemplo: App Store, renovación, 4,99 USD.'
+}
+
+Table billing.plan_features [headercolor: #7C3AED] {
+  plan_id uuid [not null]
+  feature_key text [not null]
+  is_enabled "boolean" [not null]
+  limit_value "integer"
+  indexes {
+    (plan_id, feature_key) [pk]
+  }
+  Note: 'Cuánto permite cada plan de cada funcionalidad. Cambiar un límite es un UPDATE, sin desplegar. Quién escribe: el equipo. Ejemplo: free → finance.cards 1, finance.currencies 1, ai.voice_entries 30.'
+}
+
+Table billing.plan_prices [headercolor: #7C3AED] {
+  id uuid [pk]
+  plan_id uuid [not null]
+  billing_period text [not null]
+  currency "character(3)" [not null]
+  amount "numeric(12,2)" [not null]
+  trial_days "smallint" [not null]
+  app_store_product_id text
+  play_store_product_id text
+  web_price_id text
+  is_active "boolean" [not null]
+  valid_from "timestamp with time zone" [not null]
+  valid_until "timestamp with time zone"
+  created_at "timestamp with time zone" [not null]
+  Note: 'Precio mensual y anual de cada plan de pago, con el producto de App Store y de Google Play. Un cambio de precio es una fila nueva: quien ya pagaba conserva su precio. Quién escribe: el equipo. Ejemplo: paid_1 mensual 4,99 USD, mm.plus.monthly.'
+}
+
+Table billing.plans [headercolor: #7C3AED] {
+  id uuid [pk]
+  code text [not null]
+  name text [not null]
+  description text
+  tier "smallint" [not null]
+  is_public "boolean" [not null]
+  is_active "boolean" [not null]
+  created_at "timestamp with time zone" [not null]
+  updated_at "timestamp with time zone" [not null]
+  Note: 'Planes de la app: uno gratuito (tier 0) y tres de pago. Quién escribe: el equipo. Ejemplo: free, paid_1, paid_2, paid_3.'
+}
+
+Table billing.subscription_changes [headercolor: #7C3AED] {
+  seq "bigint" [pk]
+  user_id uuid [not null]
+  subscription_id uuid
+  change_type text [not null]
+  from_plan_id uuid
+  to_plan_id uuid
+  from_price_id uuid
+  to_price_id uuid
+  from_period text
+  to_period text
+  from_status text
+  to_status text
+  source text [not null]
+  effective_at "timestamp with time zone" [not null]
+  Note: 'Historial de cada cambio de suscripción: alta, renovación, subida o bajada de plan, cancelación, expiración, vuelta a gratuito. Quién escribe: un trigger de billing.subscriptions; nadie lo edita. Ejemplo: 14-10 started; 20-10 period_changed (mensual → anual).'
+}
+
+Table billing.subscription_events [headercolor: #7C3AED] {
+  id uuid [pk]
+  subscription_id uuid
+  provider text [not null]
+  provider_event_id text [not null]
+  event_type text [not null]
+  payload jsonb [not null]
+  received_at "timestamp with time zone" [not null]
+  processed_at "timestamp with time zone"
+  error text
+  Note: 'Avisos crudos recibidos de App Store y Google Play, para procesarlos una sola vez y poder reintentarlos. Quién escribe: el worker de webhooks. Ejemplo: DID_RENEW recibido a las 10:02, procesado a las 10:02.'
+}
+
+Table billing.subscriptions [headercolor: #7C3AED] {
+  id uuid [pk]
+  user_id uuid [not null]
+  plan_id uuid [not null]
+  plan_price_id uuid [not null]
+  billing_period text [not null]
+  status text [not null]
+  provider text [not null]
+  provider_subscription_id text
+  auto_renew "boolean" [not null]
+  started_at "timestamp with time zone" [not null]
+  trial_ends_at "timestamp with time zone"
+  current_period_start "timestamp with time zone" [not null]
+  current_period_end "timestamp with time zone" [not null]
+  grace_period_ends_at "timestamp with time zone"
+  pending_plan_price_id uuid
+  pending_change_at "timestamp with time zone"
+  canceled_at "timestamp with time zone"
+  cancel_reason text
+  ended_at "timestamp with time zone"
+  created_at "timestamp with time zone" [not null]
+  updated_at "timestamp with time zone" [not null]
+  Note: 'Suscripción de un usuario a un plan de pago, mensual o anual, con su estado. Sin suscripción con acceso, el usuario está en el plan gratuito. Quién escribe: los workers que procesan los avisos de App Store y Google Play. Ejemplo: María en paid_1 mensual, activa hasta el 14-11.'
+}
+
+Table billing.usage_counters [headercolor: #7C3AED] {
+  user_id uuid [not null]
+  feature_key text [not null]
+  period_start date [not null]
+  used "integer" [not null]
+  updated_at "timestamp with time zone" [not null]
+  indexes {
+    (user_id, feature_key, period_start) [pk]
+  }
+  Note: 'Usos del mes de las funcionalidades con límite mensual. Se descuentan con billing.try_consume() y se devuelven con billing.release(). Quién escribe: esas funciones. Ejemplo: María, ai.voice_entries, octubre: 12 usados.'
+}
+
+Table catalog.account_types [headercolor: #64748B] {
+  code text [pk]
+  names jsonb [not null]
+  icon text [not null]
+  is_card "boolean" [not null]
+  sort_order "smallint" [not null]
+  is_active "boolean" [not null]
+  Note: 'Tipos de cuenta: efectivo y tarjeta (sin distinguir débito de crédito). De aquí sale si un movimiento se pagó en efectivo o con tarjeta (is_card). Quién escribe: el equipo. Ejemplo: card, Tarjeta, es tarjeta.'
+}
+
+Table catalog.category_templates [headercolor: #64748B] {
+  key text [pk]
+  kind "catalog.money_kind" [not null]
+  flow_group "catalog.flow_group"
+  names jsonb [not null]
+  icon text [not null]
+  color text [not null]
+  sort_order "smallint" [not null]
+  is_active "boolean" [not null]
+  Note: 'Categorías iniciales que recibe cada usuario nuevo. Solo categorías, sin subcategorías. Quién escribe: el equipo. Ejemplo: groceries (Supermercado), gasto, grupo Necesidades.'
+}
+
+Table catalog.countries [headercolor: #64748B] {
+  code "character(2)" [pk]
+  name text [not null]
+  currency "character(3)"
+  is_active "boolean" [not null]
+  sort_order "smallint" [not null]
+  Note: 'Países (ISO 3166-1) con su moneda local. Sirve para el país del perfil y para mostrar los bancos de cada país. Quién escribe: el equipo; agregar un país es un INSERT. Ejemplo: BO, Bolivia, BOB.'
+}
+
+Table catalog.currencies [headercolor: #64748B] {
+  code "character(3)" [pk]
+  name text [not null]
+  symbol text [not null]
+  decimals "smallint" [not null]
+  is_active "boolean" [not null]
+  sort_order "smallint" [not null]
+  Note: 'Monedas que ofrece la app (ISO 4217). Agregar una es un INSERT; desactivarla la oculta para cuentas nuevas sin tocar lo existente. Quién escribe: el equipo. Ejemplo: BOB, Boliviano, Bs, 2 decimales.'
+}
+
+Table catalog.financial_institutions [headercolor: #64748B] {
+  code text [pk]
+  country_code "character(2)" [not null]
+  name text [not null]
+  short_name text [not null]
+  kind text [not null]
+  is_active "boolean" [not null]
+  sort_order "smallint" [not null]
+  Note: 'Bancos, cooperativas, microfinancieras y billeteras de cada país que emiten tarjetas. La app muestra la lista del país del usuario en vez de pedir el nombre como texto. Quién escribe: el equipo. Ejemplo: bo.bnb, Banco Nacional de Bolivia (BNB), banco.'
+}
+
+Table core.audit_log [headercolor: #475569] {
+  id uuid [not null]
+  occurred_at "timestamp with time zone" [not null]
+  actor_user_id uuid
+  owner_user_id uuid
+  entity text [not null]
+  entity_id uuid
+  action text [not null]
+  changes jsonb
+  ip inet
+  indexes {
+    (occurred_at, id) [pk]
+  }
+  Note: 'Historial de quién cambió qué dato sensible (cuentas, configuración, metas, suscripciones), solo con las columnas que cambiaron. Particionada por mes. Quién escribe: triggers de auditoría. Ejemplo: María cambió el nombre de su cuenta de \'Efectivo\' a \'Billetera\'.'
+}
+
+Table core.outbox_events [headercolor: #475569] {
+  id uuid [pk]
+  aggregate_type text [not null]
+  aggregate_id uuid [not null]
+  user_id uuid
+  event_type text [not null]
+  payload jsonb [not null]
+  occurred_at "timestamp with time zone" [not null]
+  published_at "timestamp with time zone"
+  attempts "integer" [not null]
+  Note: 'Eventos de dominio pendientes de publicar (patrón outbox): se escriben en la misma transacción que el cambio y un worker los envía a Celery. Quién escribe: la API y los workers; el worker los marca publicados. Ejemplo: transaction.created de María.'
+}
+
+Table finance.accounts [headercolor: #16A34A] {
+  id uuid [pk]
+  user_id uuid [not null]
+  name text [not null]
+  type text [not null]
+  currency "character(3)" [not null]
+  opening_balance "numeric(19,4)" [not null]
+  current_balance "numeric(19,4)" [not null]
+  is_default "boolean" [not null]
+  sort_order "smallint" [not null]
+  archived_at "timestamp with time zone"
+  created_at "timestamp with time zone" [not null]
+  updated_at "timestamp with time zone" [not null]
+  deleted_at "timestamp with time zone"
+  Note: 'Dónde está el dinero del usuario: su efectivo y sus tarjetas, cada una con su saldo. Una moneda por cuenta y una sola cuenta por defecto. Quién escribe: la API (crear, renombrar, archivar); los triggers (saldo, cuenta por defecto, límites del plan). Ejemplo: \'Tarjeta BNB Bs\', tarjeta, BOB, saldo 1.525,40.'
+}
+
+Table finance.cards [headercolor: #16A34A] {
+  account_id uuid [pk]
+  user_id uuid [not null]
+  account_type text [not null]
+  institution_code text
+  last4 "character(4)"
+  created_at "timestamp with time zone" [not null]
+  updated_at "timestamp with time zone" [not null]
+  Note: 'Datos que solo tienen las tarjetas (1 a 1 con su cuenta): banco emisor del catálogo y últimos 4 dígitos. El saldo y la moneda están en finance.accounts. Quién escribe: la API al crear o editar una tarjeta. Ejemplo: Visa del BNB ••9012.'
+}
+
+Table finance.categories [headercolor: #16A34A] {
+  id uuid [pk]
+  user_id uuid [not null]
+  template_key text
+  kind "catalog.money_kind" [not null]
+  flow_group "catalog.flow_group"
+  name text [not null]
+  icon text [not null]
+  color text [not null]
+  sort_order "smallint" [not null]
+  created_at "timestamp with time zone" [not null]
+  updated_at "timestamp with time zone" [not null]
+  deleted_at "timestamp with time zone"
+  Note: 'Categorías de cada usuario: copia editable de las iniciales más las que cree. kind dice si es ingreso o gasto; flow_group, a qué nodo del Money Flow va un gasto. Quién escribe: finance.setup_user() al registrarse; la API cuando el usuario crea, renombra o borra. Ejemplo: \'Supermercado\', gasto, Necesidades.'
+}
+
+Table finance.recurring_rules [headercolor: #16A34A] {
+  id uuid [pk]
+  user_id uuid [not null]
+  account_id uuid [not null]
+  category_id uuid [not null]
+  amount "numeric(19,4)" [not null]
+  currency "character(3)" [not null]
+  description text [not null]
+  frequency "finance.frequency" [not null]
+  start_date date [not null]
+  end_date date
+  next_due_on date [not null]
+  is_committed "boolean" [not null]
+  auto_post "boolean" [not null]
+  remind_days_before "smallint" [not null]
+  is_active "boolean" [not null]
+  created_at "timestamp with time zone" [not null]
+  updated_at "timestamp with time zone" [not null]
+  deleted_at "timestamp with time zone"
+  Note: 'Gastos e ingresos que se repiten: alquiler, sueldo, Netflix. Sirven para recordatorios, para registrarse solos (auto_post) y para restarse en Safe to Spend (is_committed). Ingreso o gasto sale de su categoría. Quién escribe: la API (onboarding y Ajustes); el worker avanza next_due_on. Ejemplo: Alquiler, 1.500 Bs desde Efectivo, mensual desde el 31-01.'
+}
+
+Table finance.transactions [headercolor: #16A34A] {
+  id uuid [not null]
+  user_id uuid [not null]
+  kind "catalog.money_kind" [not null]
+  account_id uuid [not null]
+  category_id uuid
+  amount "numeric(19,4)" [not null]
+  currency "character(3)" [not null]
+  transfer_account_id uuid
+  occurred_on date [not null]
+  description text [not null]
+  source "finance.transaction_source" [not null]
+  recurring_rule_id uuid
+  created_at "timestamp with time zone" [not null]
+  updated_at "timestamp with time zone" [not null]
+  deleted_at "timestamp with time zone"
+  indexes {
+    (user_id, id) [pk]
+  }
+  Note: 'Cada ingreso, gasto o transferencia, en la moneda de su cuenta. Es la tabla más grande: está dividida en 16 particiones por usuario. Guarda la moneda (copia de la de su cuenta) para sumar por moneda sin unir tablas. Quién escribe: la API (Quick Add, voz, escaneo) y el worker (recurrentes); los triggers ajustan los saldos. Ejemplo: gasto de 105 Bs, \'Netflix\', con la tarjeta BNB el 14-10.'
+}
+
+Table finance.user_currencies [headercolor: #16A34A] {
+  user_id uuid [not null]
+  currency "character(3)" [not null]
+  sort_order "smallint" [not null]
+  created_at "timestamp with time zone" [not null]
+  indexes {
+    (user_id, currency) [pk]
+  }
+  Note: 'Mis monedas: las que el usuario ve primero al elegir moneda. Se llena sola con la moneda principal y las de sus cuentas. Quién escribe: triggers, y la API cuando el usuario agrega o quita una. Ejemplo: María tiene BOB y USD.'
+}
+
+Table finance.user_settings [headercolor: #16A34A] {
+  user_id uuid [pk]
+  main_currency "character(3)" [not null]
+  period_type "finance.period_type" [not null]
+  period_start_day "smallint" [not null]
+  planned_savings "numeric(19,4)" [not null]
+  updated_at "timestamp with time zone" [not null]
+  Note: 'Configuración financiera de cada usuario (una fila): moneda principal, periodo financiero y ahorro planificado. Quién escribe: finance.setup_user() en el onboarding y la API desde Ajustes. Ejemplo: moneda principal BOB, periodo mensual desde el día 25 (su día de cobro), ahorra 500 Bs por periodo.'
+}
+
+Table goals.goal_contributions [headercolor: #0D9488] {
+  id uuid [pk]
+  user_id uuid [not null]
+  goal_id uuid [not null]
+  amount "numeric(19,4)" [not null]
+  contributed_on date [not null]
+  source text [not null]
+  transaction_id uuid
+  note text
+  created_at "timestamp with time zone" [not null]
+  Note: 'Aportes y retiros de cada meta, en la moneda de la meta. Su ritmo alimenta el Goal Forecast. Quién escribe: la API. Ejemplo: +300 Bs el 01-10; −50 Bs el 10-10.'
+}
+
+Table goals.goals [headercolor: #0D9488] {
+  id uuid [pk]
+  user_id uuid [not null]
+  name text [not null]
+  target_amount "numeric(19,4)" [not null]
+  currency "character(3)" [not null]
+  current_amount "numeric(19,4)" [not null]
+  target_date date
+  priority "smallint" [not null]
+  planned_contribution "numeric(19,4)"
+  status text [not null]
+  achieved_at "timestamp with time zone"
+  icon text
+  color text
+  created_at "timestamp with time zone" [not null]
+  updated_at "timestamp with time zone" [not null]
+  deleted_at "timestamp with time zone"
+  Note: 'Metas de ahorro: fondo de emergencia, laptop, viaje. Cada meta tiene su moneda y no se vincula a una cuenta. Quién escribe: la API; current_amount lo mantiene un trigger con los aportes. Ejemplo: Fondo de emergencia, 5.000 Bs, lleva 450, aporta 300 por periodo.'
+}
+
+Table iam.auth_identities [headercolor: #2563EB] {
+  id uuid [pk]
+  user_id uuid [not null]
+  provider text [not null]
+  provider_subject text [not null]
+  password_hash text
+  created_at "timestamp with time zone" [not null]
+  last_used_at "timestamp with time zone"
+  Note: 'Formas de entrar de cada usuario: correo y contraseña, Google, Meta o Apple. Un usuario puede tener varias; cada una identifica a un solo usuario. Quién escribe: la API al registrarse o vincular un método. Ejemplo: María entra con Google (sub 1093…) y con su contraseña.'
+}
+
+Table iam.devices [headercolor: #2563EB] {
+  id uuid [pk]
+  user_id uuid [not null]
+  platform text [not null]
+  push_token text
+  app_version text
+  os_version text
+  biometric_enabled "boolean" [not null]
+  last_seen_at "timestamp with time zone" [not null]
+  created_at "timestamp with time zone" [not null]
+  revoked_at "timestamp with time zone"
+  Note: 'Teléfonos y navegadores del usuario: token de notificaciones push y si activó huella o rostro. Quién escribe: la API al iniciar sesión o renovar el token push. Ejemplo: iPhone de María, iOS 19, biometría activada.'
+}
+
+Table iam.email_verifications [headercolor: #2563EB] {
+  id uuid [pk]
+  email citext [not null]
+  token_hash text [not null]
+  expires_at "timestamp with time zone" [not null]
+  last_sent_at "timestamp with time zone" [not null]
+  verified_at "timestamp with time zone"
+  used_at "timestamp with time zone"
+  created_at "timestamp with time zone" [not null]
+  Note: 'Correos verificados con un link antes de crear la cuenta; del link solo se guarda el hash'
+}
+
+Table iam.sessions [headercolor: #2563EB] {
+  id uuid [pk]
+  user_id uuid [not null]
+  device_id uuid
+  refresh_token_hash text [not null]
+  replaced_by uuid
+  ip inet
+  user_agent text
+  created_at "timestamp with time zone" [not null]
+  expires_at "timestamp with time zone" [not null]
+  revoked_at "timestamp with time zone"
+  Note: 'Sesiones abiertas: cada refresh token (guardado como hash) y su dispositivo. Permite cerrar sesión en un dispositivo, ver dispositivos activos y detectar un token robado que se reusa. Quién escribe: la API al iniciar sesión y en cada renovación (rotación). Ejemplo: sesión del iPhone, vence en 30 días.'
+}
+
+Table iam.terms_versions [headercolor: #2563EB] {
+  version text [pk]
+  terms_url text [not null]
+  privacy_url text [not null]
+  is_current "boolean" [not null]
+  published_at "timestamp with time zone" [not null]
+  Note: 'Versiones publicadas de los términos de uso y la política de privacidad; solo una es la vigente. Quién escribe: el equipo, al publicar una versión nueva. Ejemplo: 2026-10, vigente, con sus dos enlaces.'
+}
+
+Table iam.user_preferences [headercolor: #2563EB] {
+  user_id uuid [pk]
+  theme text [not null]
+  accent_color text
+  hide_amounts "boolean" [not null]
+  week_starts_on "smallint" [not null]
+  updated_at "timestamp with time zone" [not null]
+  Note: 'Personalización de la app guardada en el servidor, para que sea igual en todos los dispositivos. Quién escribe: un trigger la crea al registrarse; después la API cuando el usuario cambia tema, color, modo privado o inicio de semana. Ejemplo: tema oscuro, acento verde, montos ocultos, semana desde el lunes.'
+}
+
+Table iam.users [headercolor: #2563EB] {
+  id uuid [pk]
+  email citext [not null]
+  email_verified_at "timestamp with time zone"
+  first_name text [not null]
+  last_name text [not null]
+  display_name text [not null]
+  avatar_object_key text
+  country_code "character(2)"
+  city text
+  occupation text
+  terms_version text [not null]
+  terms_accepted_at "timestamp with time zone" [not null]
+  locale text [not null]
+  timezone text [not null]
+  status text [not null]
+  onboarding_completed_at "timestamp with time zone"
+  last_login_at "timestamp with time zone"
+  created_at "timestamp with time zone" [not null]
+  updated_at "timestamp with time zone" [not null]
+  deleted_at "timestamp with time zone"
+  deletion_requested_at "timestamp with time zone"
+  Note: 'Una fila por persona registrada: es la cuenta que inicia sesión, paga y es dueña de todos sus datos financieros. Quién escribe: la API al registrarse y al editar el perfil; la base limpia nombres, teléfono y país y exige 18 años y los términos vigentes. Ejemplo: María José Rojas, maria@correo.com, nacida en 1995, estudiante en La Paz.'
+}
+
+Table iam.verification_tokens [headercolor: #2563EB] {
+  id uuid [pk]
+  user_id uuid [not null]
+  purpose text [not null]
+  token_hash text [not null]
+  expires_at "timestamp with time zone" [not null]
+  used_at "timestamp with time zone"
+  created_at "timestamp with time zone" [not null]
+  Note: 'Códigos de un solo uso para verificar el correo, recuperar la contraseña o cambiar el correo, guardados como hash. Quién escribe: la API al enviar el correo; se marca usado al confirmarlo. Ejemplo: recuperación de contraseña, vence en 1 hora.'
+}
+
+Table notify.notification_types [headercolor: #DB2777] {
+  key text [pk]
+  description text [not null]
+  default_enabled "boolean" [not null]
+  is_transactional "boolean" [not null]
+  Note: 'Tipos de aviso que existen y si el usuario los puede apagar (los de seguridad y suscripción no). Quién escribe: el equipo. Ejemplo: recurring.due_soon, activado por defecto.'
+}
+
+Table notify.notifications [headercolor: #DB2777] {
+  id uuid [not null]
+  created_at "timestamp with time zone" [not null]
+  user_id uuid [not null]
+  type_key text [not null]
+  channel text [not null]
+  title text [not null]
+  body text [not null]
+  data jsonb [not null]
+  dedupe_key text
+  status text [not null]
+  scheduled_for "timestamp with time zone" [not null]
+  sent_at "timestamp with time zone"
+  read_at "timestamp with time zone"
+  error text
+  indexes {
+    (created_at, id) [pk]
+  }
+  Note: 'Bandeja y registro de envíos de cada aviso. Particionada por mes. Quién escribe: los workers al encolar y al enviar; la API marca read_at. Ejemplo: \'Mañana vence tu alquiler de 1.500 Bs\', enviada el 30-10.'
+}
+
+Table notify.preferences [headercolor: #DB2777] {
+  user_id uuid [not null]
+  type_key text [not null]
+  channel text [not null]
+  is_enabled "boolean" [not null]
+  updated_at "timestamp with time zone" [not null]
+  indexes {
+    (user_id, type_key, channel) [pk]
+  }
+  Note: 'Avisos que el usuario cambió en Ajustes; sin fila se usa el valor por defecto del tipo. Quién escribe: la API. Ejemplo: María apagó goal.milestone por push.'
+}
+
+Table ops.incident_affected_users [headercolor: #DC2626] {
+  incident_id uuid [not null]
+  user_id uuid [not null]
+  first_seen_at "timestamp with time zone" [not null]
+  notified_at "timestamp with time zone"
+  indexes {
+    (incident_id, user_id) [pk]
+  }
+  Note: 'Usuarios afectados por cada incidente, para avisarles o compensarlos. Quién escribe: ops.log() cuando el error tiene usuario. Ejemplo: INC-000012 afectó a María; avisada el 15-10.'
+}
+
+Table ops.incident_updates [headercolor: #DC2626] {
+  id uuid [pk]
+  incident_id uuid [not null]
+  created_at "timestamp with time zone" [not null]
+  author text [not null]
+  status_from text
+  status_to text
+  severity_from text
+  severity_to text
+  note text
+  is_public "boolean" [not null]
+  Note: 'Línea de tiempo de cada incidente: cambios de estado y severidad, y notas del equipo. Quién escribe: triggers de ops.incidents y el equipo. Ejemplo: 10:05 open → investigating, por dana@moneymap.team.'
+}
+
+Table ops.incidents [headercolor: #DC2626] {
+  id uuid [pk]
+  number "bigint" [not null]
+  code text
+  title text [not null]
+  description text
+  severity text [not null]
+  status text [not null]
+  category text [not null]
+  fingerprint text
+  detected_by text [not null]
+  previous_incident_id uuid
+  first_seen_at "timestamp with time zone" [not null]
+  last_seen_at "timestamp with time zone" [not null]
+  occurrences "integer" [not null]
+  affected_users "integer" [not null]
+  assigned_to text
+  acknowledged_at "timestamp with time zone"
+  resolved_at "timestamp with time zone"
+  closed_at "timestamp with time zone"
+  impact text
+  root_cause text
+  resolution text
+  postmortem_url text
+  created_at "timestamp with time zone" [not null]
+  updated_at "timestamp with time zone" [not null]
+  Note: 'Agrupa errores repetidos con la misma huella y sigue su ciclo: abierto → investigando → identificado → monitoreo → resuelto → cerrado, con responsable y causa raíz. Quién escribe: ops.log() abre o suma; el equipo cambia el estado. Ejemplo: INC-000012, sev3, push.fcm.timeout, 37 ocurrencias.'
+}
+
+Table ops.logs [headercolor: #DC2626] {
+  id uuid [not null]
+  occurred_at "timestamp with time zone" [not null]
+  level text [not null]
+  severity "smallint"
+  category text [not null]
+  event_code text [not null]
+  message text [not null]
+  service text [not null]
+  environment text [not null]
+  release text
+  user_id uuid
+  device_id uuid
+  request_id text
+  trace_id text
+  http_method text
+  http_path text
+  http_status "smallint"
+  duration_ms "integer"
+  error_type text
+  error_message text
+  stack_trace text
+  fingerprint text
+  incident_id uuid
+  context jsonb [not null]
+  ip inet
+  indexes {
+    (occurred_at, id) [pk]
+  }
+  Note: 'Eventos importantes del sistema, de solo inserción: errores, fallos de integraciones (tiendas, IA, push), eventos de seguridad y jobs. Nadie puede editar ni borrar un log. Particionada por mes. Quién escribe: la API y los workers con ops.log(). Ejemplo: warning ai.call.timeout de GPT-6 Luna.'
+}
+
+Table planning.affordability_checks [headercolor: #0891B2] {
+  id uuid [pk]
+  user_id uuid [not null]
+  description text
+  amount "numeric(19,4)" [not null]
+  currency "character(3)" [not null]
+  verdict text [not null]
+  safe_to_spend_before "numeric(19,4)" [not null]
+  safe_to_spend_after "numeric(19,4)" [not null]
+  earliest_affordable_on date
+  impacts jsonb [not null]
+  assumptions jsonb [not null]
+  algorithm_version text [not null]
+  decision text
+  created_at "timestamp with time zone" [not null]
+  Note: 'Historial de Can I Afford It?: qué consultó el usuario, el veredicto, el impacto en sus metas y lo que decidió. Cuenta para la North Star. Quién escribe: la API. Ejemplo: Laptop 4.000 Bs → affordable_with_impact, retrasa el Fondo 2 meses; decidió esperar.'
+}
+
+Table reports.money_stories [headercolor: #EA580C] {
+  id uuid [pk]
+  user_id uuid [not null]
+  period_type text [not null]
+  period_start date [not null]
+  period_end date [not null]
+  status text [not null]
+  currency "character(3)" [not null]
+  income_total "numeric(19,4)"
+  expense_total "numeric(19,4)"
+  savings_total "numeric(19,4)"
+  savings_rate "numeric(7,4)"
+  highlights jsonb [not null]
+  template_version text [not null]
+  generated_at "timestamp with time zone"
+  viewed_at "timestamp with time zone"
+  created_at "timestamp with time zone" [not null]
+  Note: 'Resumen semanal (Weekly Check-in) o mensual (Monthly Money Story) por moneda: cuánto ganó, gastó y ahorró, y frases destacadas guardadas como claves. Quién escribe: el worker al cerrar la semana o el mes; la API marca viewed_at. Ejemplo: octubre en BOB: ingresó 5.000, gastó 3.800, ahorró 24 %.'
+}
+
+Ref: ai.calls.model_code > ai.models.code
+
+Ref: ai.calls.task > ai.tasks.key
+
+Ref: ai.route_changes.task > ai.tasks.key
+
+Ref: ai.routes.model_code > ai.models.code
+
+Ref: ai.routes.task > ai.tasks.key
+
+Ref: ai.usage_monthly.task > ai.tasks.key
+
+Ref: ai.voice_entries.(user_id, transaction_id) > finance.transactions.(user_id, id)
+
+Ref: ai.voice_entries.llm_model_code > ai.models.code
+
+Ref: ai.voice_entries.stt_model_code > ai.models.code
+
+Ref: ai.voice_entries.user_id > iam.users.id
+
+Ref: billing.payments.plan_price_id > billing.plan_prices.id
+
+Ref: billing.payments.subscription_id > billing.subscriptions.id
+
+Ref: billing.payments.user_id > iam.users.id
+
+Ref: billing.plan_features.feature_key > billing.features.key
+
+Ref: billing.plan_features.plan_id > billing.plans.id
+
+Ref: billing.plan_prices.currency > catalog.currencies.code
+
+Ref: billing.plan_prices.plan_id > billing.plans.id
+
+Ref: billing.subscription_changes.from_plan_id > billing.plans.id
+
+Ref: billing.subscription_changes.from_price_id > billing.plan_prices.id
+
+Ref: billing.subscription_changes.subscription_id > billing.subscriptions.id
+
+Ref: billing.subscription_changes.to_plan_id > billing.plans.id
+
+Ref: billing.subscription_changes.to_price_id > billing.plan_prices.id
+
+Ref: billing.subscription_changes.user_id > iam.users.id
+
+Ref: billing.subscription_events.subscription_id > billing.subscriptions.id
+
+Ref: billing.subscriptions.(plan_price_id, plan_id, billing_period) > billing.plan_prices.(id, plan_id, billing_period)
+
+Ref: billing.subscriptions.pending_plan_price_id > billing.plan_prices.id
+
+Ref: billing.subscriptions.plan_id > billing.plans.id
+
+Ref: billing.subscriptions.user_id > iam.users.id
+
+Ref: billing.usage_counters.feature_key > billing.features.key
+
+Ref: billing.usage_counters.user_id > iam.users.id
+
+Ref: catalog.countries.currency > catalog.currencies.code
+
+Ref: catalog.financial_institutions.country_code > catalog.countries.code
+
+Ref: finance.accounts.currency > catalog.currencies.code
+
+Ref: finance.accounts.type > catalog.account_types.code
+
+Ref: finance.accounts.user_id > iam.users.id
+
+Ref: finance.cards.(user_id, account_id, account_type) > finance.accounts.(user_id, id, type)
+
+Ref: finance.cards.institution_code > catalog.financial_institutions.code
+
+Ref: finance.categories.template_key > catalog.category_templates.key
+
+Ref: finance.categories.user_id > iam.users.id
+
+Ref: finance.recurring_rules.(user_id, account_id, currency) > finance.accounts.(user_id, id, currency)
+
+Ref: finance.recurring_rules.(user_id, category_id) > finance.categories.(user_id, id)
+
+Ref: finance.recurring_rules.user_id > iam.users.id
+
+Ref: finance.transactions.(user_id, account_id, currency) > finance.accounts.(user_id, id, currency)
+
+Ref: finance.transactions.(user_id, category_id, kind) > finance.categories.(user_id, id, kind)
+
+Ref: finance.transactions.(user_id, recurring_rule_id) > finance.recurring_rules.(user_id, id)
+
+Ref: finance.transactions.(user_id, transfer_account_id, currency) > finance.accounts.(user_id, id, currency)
+
+Ref: finance.transactions.user_id > iam.users.id
+
+Ref: finance.user_currencies.currency > catalog.currencies.code
+
+Ref: finance.user_currencies.user_id > iam.users.id
+
+Ref: finance.user_settings.main_currency > catalog.currencies.code
+
+Ref: finance.user_settings.user_id > iam.users.id
+
+Ref: goals.goal_contributions.(user_id, goal_id) > goals.goals.(user_id, id)
+
+Ref: goals.goal_contributions.(user_id, transaction_id) > finance.transactions.(user_id, id)
+
+Ref: goals.goals.currency > catalog.currencies.code
+
+Ref: goals.goals.user_id > iam.users.id
+
+Ref: iam.auth_identities.user_id > iam.users.id
+
+Ref: iam.devices.user_id > iam.users.id
+
+Ref: iam.sessions.device_id > iam.devices.id
+
+Ref: iam.sessions.replaced_by > iam.sessions.id
+
+Ref: iam.sessions.user_id > iam.users.id
+
+Ref: iam.user_preferences.user_id > iam.users.id
+
+Ref: iam.users.country_code > catalog.countries.code
+
+Ref: iam.users.terms_version > iam.terms_versions.version
+
+Ref: iam.verification_tokens.user_id > iam.users.id
+
+Ref: notify.notifications.type_key > notify.notification_types.key
+
+Ref: notify.notifications.user_id > iam.users.id
+
+Ref: notify.preferences.type_key > notify.notification_types.key
+
+Ref: notify.preferences.user_id > iam.users.id
+
+Ref: ops.incident_affected_users.incident_id > ops.incidents.id
+
+Ref: ops.incident_updates.incident_id > ops.incidents.id
+
+Ref: ops.incidents.previous_incident_id > ops.incidents.id
+
+Ref: planning.affordability_checks.currency > catalog.currencies.code
+
+Ref: planning.affordability_checks.user_id > iam.users.id
+
+Ref: reports.money_stories.currency > catalog.currencies.code
+
+Ref: reports.money_stories.user_id > iam.users.id
+
+TableGroup ai {
+  ai.calls
+  ai.models
+  ai.route_changes
+  ai.routes
+  ai.tasks
+  ai.usage_monthly
+  ai.voice_entries
+}
+
+TableGroup billing {
+  billing.features
+  billing.payments
+  billing.plan_features
+  billing.plan_prices
+  billing.plans
+  billing.subscription_changes
+  billing.subscription_events
+  billing.subscriptions
+  billing.usage_counters
+}
+
+TableGroup catalog {
+  catalog.account_types
+  catalog.category_templates
+  catalog.countries
+  catalog.currencies
+  catalog.financial_institutions
+}
+
+TableGroup core {
+  core.audit_log
+  core.outbox_events
+}
+
+TableGroup finance {
+  finance.accounts
+  finance.cards
+  finance.categories
+  finance.recurring_rules
+  finance.transactions
+  finance.user_currencies
+  finance.user_settings
+}
+
+TableGroup goals {
+  goals.goal_contributions
+  goals.goals
+}
+
+TableGroup iam {
+  iam.auth_identities
+  iam.devices
+  iam.email_verifications
+  iam.sessions
+  iam.terms_versions
+  iam.user_preferences
+  iam.users
+  iam.verification_tokens
+}
+
+TableGroup notify {
+  notify.notification_types
+  notify.notifications
+  notify.preferences
+}
+
+TableGroup ops {
+  ops.incident_affected_users
+  ops.incident_updates
+  ops.incidents
+  ops.logs
+}
+
+TableGroup planning {
+  planning.affordability_checks
+}
+
+TableGroup reports {
+  reports.money_stories
+}

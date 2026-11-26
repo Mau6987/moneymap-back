@@ -1,0 +1,5 @@
+# Solo para la imagen del servicio stt (docker-compose.ai.yml), no para la API.
+onnx-asr[cpu,hub]>=0.7
+faster-whisper>=1.1
+# faster-whisper 1.2 todavía llama a av.open con metadata_errors, que PyAV 17 quitó.
+av<17

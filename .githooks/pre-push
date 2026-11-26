@@ -1,0 +1,26 @@
+#!/bin/sh
+# Hook local de pre-push: lo lento.
+#
+# Corre lo que tarda decenas de segundos, para que no estorbe en cada commit.
+# Saltear cuando haga falta: git push --no-verify
+
+set -e
+
+if ! command -v uv >/dev/null 2>&1; then
+  echo "pre-push: uv no está en el PATH; se saltea la verificación."
+  exit 0
+fi
+
+echo "pre-push: ruff check"
+uv run ruff check .
+
+echo "pre-push: ruff format --check"
+uv run ruff format --check .
+
+echo "pre-push: mypy app"
+uv run mypy app
+
+echo "pre-push: pytest"
+uv run pytest
+
+exit 0

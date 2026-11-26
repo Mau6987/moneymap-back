@@ -1,0 +1,69 @@
+# La IA propia del registro por voz (spec 012), independiente de la API: puede
+# correr en otro servidor y se reinicia o se actualiza sin tocarla.
+#
+#   Servidor de IA (Dokploy):        proveedor GitHub, Compose Path docker-compose.ai.yml
+#                                    (stt se construye desde services/stt: Raw no sirve)
+#   Laptop, solo voz a texto:        docker compose -f docker-compose.ai.yml up -d stt
+#     (el LLM es Ollama de escritorio: LLM_BASE_URL en el .env)
+#
+# En el mismo servidor que la API, el worker los llama por la red moneymap-ai
+# (http://stt:8090, http://llm:11434) sin configurar nada.
+#
+# En otro servidor: ni stt ni Ollama tienen clave, así que los puertos se publican
+# solo en AI_BIND, su IP de la red privada con el de la API (VPC del proveedor o
+# Tailscale), y el worker los llama en AI_STT_URL y AI_LLM_URL. Nunca 0.0.0.0:
+# cualquiera usaría los modelos. Por defecto, 127.0.0.1.
+#
+# Los modelos (unos 8 GB) se bajan al primer arranque a volúmenes de Docker, no
+# al repositorio.
+
+services:
+  # Voz a texto: Parakeet (principal) y Whisper (respaldo), en CPU.
+  stt:
+    build: services/stt
+    restart: unless-stopped
+    environment:
+      # En la laptop alcanza con el principal: STT_MODELS=parakeet
+      STT_MODELS: ${STT_MODELS:-parakeet,whisper}
+      STT_THREADS: ${STT_THREADS:-4}
+    ports:
+      - "${AI_BIND:-127.0.0.1}:${STT_PORT:-8090}:8090"
+    volumes:
+      - stt-models:/models
+    networks:
+      - moneymap-ai
+
+  # El LLM que convierte la frase en un movimiento: Qwen 3.5 4B (principal) y
+  # Gemma 3 4B (respaldo). Baja los modelos que falten y los deja cargados.
+  llm:
+    image: ollama/ollama:0.40.10
+    restart: unless-stopped
+    environment:
+      LLM_MODELS: ${LLM_MODELS:-qwen3.5:4b gemma3:4b}
+      OLLAMA_KEEP_ALIVE: 24h
+      OLLAMA_NUM_PARALLEL: 1
+      OLLAMA_MAX_LOADED_MODELS: 2
+    entrypoint:
+      - sh
+      - -c
+      - |
+        ollama serve &
+        pid=$$!
+        sleep 5
+        for model in $$LLM_MODELS; do ollama pull "$$model"; done
+        wait "$$pid"
+    ports:
+      - "${AI_BIND:-127.0.0.1}:${LLM_PORT:-11434}:11434"
+    volumes:
+      - ollama:/root/.ollama
+    networks:
+      - moneymap-ai
+
+# La comparte docker-compose.yml en el mismo servidor; en otro, queda sola.
+networks:
+  moneymap-ai:
+    name: moneymap-ai
+
+volumes:
+  stt-models:
+  ollama:

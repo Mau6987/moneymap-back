@@ -1,0 +1,40 @@
+#!/bin/sh
+# Hook local de pre-commit.
+#
+# Activar (una sola vez por clon):
+#   git config core.hooksPath .githooks
+# Saltear cuando haga falta:
+#   git commit --no-verify
+#
+# Hace dos cosas, y solo sobre los archivos que están en stage:
+#   1. Frena los archivos que no van al repositorio (secretos).
+#   2. Le da formato y pasa el lint arreglable a los .py que se están por commitear.
+
+set -e
+
+staged=$(git diff --cached --name-only --diff-filter=ACM)
+
+# --- 1. Archivos prohibidos -------------------------------------------------
+forbidden=$(printf '%s\n' "$staged" | grep -E '(^|/)\.env$|\.(p8|keystore|jks|p12)$' || true)
+if [ -n "$forbidden" ]; then
+  echo "pre-commit: estos archivos no van al repositorio:"
+  printf '%s\n' "$forbidden"
+  echo "si es un secreto, además de sacarlo hay que rotarlo."
+  exit 1
+fi
+
+# --- 2. Formato y lint de los .py en stage ---------------------------------
+py_files=$(printf '%s\n' "$staged" | grep '\.py$' || true)
+if [ -n "$py_files" ]; then
+  if ! command -v uv >/dev/null 2>&1; then
+    echo "pre-commit: uv no está en el PATH; se saltea el formato."
+    exit 0
+  fi
+  echo "pre-commit: ruff format"
+  printf '%s\n' "$py_files" | xargs uv run ruff format
+  echo "pre-commit: ruff check --fix"
+  printf '%s\n' "$py_files" | xargs uv run ruff check --fix
+  printf '%s\n' "$py_files" | xargs git add
+fi
+
+exit 0

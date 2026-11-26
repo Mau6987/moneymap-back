@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+.env.*
+!.env.example
+!.env.prod.example
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+openapi.json
+*.stackdump

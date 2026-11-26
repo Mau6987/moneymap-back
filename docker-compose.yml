@@ -1,0 +1,185 @@
+# Un solo compose para desarrollo, QA y producción (Dokploy). Lo que cambia de
+# un ambiente a otro está en el .env: en desarrollo, el copiado de .env.example;
+# en el servidor, el que escribe Dokploy con las variables de .env.prod.example.
+#
+#   Solo la base y Redis (la API con uv):  docker compose up -d db redis
+#   Todo el backend:                       docker compose up -d --build
+#
+# Los puertos se publican solo en 127.0.0.1: desde la máquina se llega (la base
+# en localhost:5436, la API en localhost:8000/docs), desde afuera no. En el
+# servidor la API sale por el dominio que configura Dokploy.
+#
+# Sin claves en el .env, todo usa `moneymap` y Redis va sin clave: solo sirve en
+# dev. Fuera de dev, `migrate` no deja arrancar nada sin claves propias.
+
+# Lo que leen la API y el worker, armado con las claves del .env. La URL del
+# dueño de las tablas la ve solo `migrate`.
+x-app-env: &app-env
+  DATABASE_URL: postgresql+asyncpg://moneymap_api:${API_DB_PASSWORD:-moneymap}@db:5432/moneymap
+  REDIS_URL: redis://${REDIS_PASSWORD:+:${REDIS_PASSWORD}@}redis:6379/0
+  VOICE_AUDIO_DIR: /voice-audio
+  # Las fotos de los comprobantes (spec 014), en el servicio `receipts`.
+  RECEIPTS_ENDPOINT: receipts:8333
+  # El .env de Dokploy la trae: la API y el worker no la necesitan.
+  POSTGRES_PASSWORD: ""
+
+x-app: &app
+  build: .
+  env_file: .env
+  environment: *app-env
+  restart: unless-stopped
+
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: moneymap          # dueño de las tablas: solo para migraciones
+      # Solo se aplica al crear el volumen: cambiarla después no cambia la clave.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-moneymap}
+      POSTGRES_DB: moneymap
+    ports:
+      - "127.0.0.1:${DB_PORT:-5436}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db:/db:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U moneymap -d moneymap"]
+      interval: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --appendonly yes ${REDIS_PASSWORD:+--requirepass ${REDIS_PASSWORD}}
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redisdata:/data
+
+  # Las fotos de los comprobantes (spec 014): un S3 propio con SeaweedFS. Solo la
+  # API llega a él; en dev se publica en localhost:9000 para la API con uv. Las
+  # claves salen de RECEIPTS_ACCESS_KEY y RECEIPTS_SECRET_KEY.
+  receipts:
+    image: chrislusf/seaweedfs:4.50
+    restart: unless-stopped
+    environment:
+      RECEIPTS_ACCESS_KEY: ${RECEIPTS_ACCESS_KEY:-moneymap}
+      RECEIPTS_SECRET_KEY: ${RECEIPTS_SECRET_KEY:-moneymap-dev}
+    entrypoint:
+      - sh
+      - -c
+      - |
+        printf '{"identities":[{"name":"api","credentials":[{"accessKey":"%s","secretKey":"%s"}],"actions":["Admin","Read","Write","List"]}]}'           "$$RECEIPTS_ACCESS_KEY" "$$RECEIPTS_SECRET_KEY" > /tmp/s3.json
+        exec weed server -dir=/data -s3 -s3.port=8333 -s3.config=/tmp/s3.json
+    ports:
+      - "127.0.0.1:${RECEIPTS_PORT:-9000}:8333"
+    volumes:
+      - receipts:/data
+
+  # Fuera de dev, corta el despliegue antes de migrar si alguna clave quedó en
+  # el valor de desarrollo.
+  migrate:
+    <<: *app
+    restart: "no"
+    command:
+      - sh
+      - -c
+      - |
+        if [ "$${ENVIRONMENT:-dev}" != dev ] && { [ "$$POSTGRES_PASSWORD" = moneymap ] || [ "$$API_DB_PASSWORD" = moneymap ] || [ "$$WORKER_DB_PASSWORD" = moneymap ] || [ -z "$$REDIS_PASSWORD" ] || [ "$$RECEIPTS_SECRET_KEY" = moneymap-dev ]; }; then
+          echo "Fuera de dev hacen falta POSTGRES_PASSWORD, API_DB_PASSWORD, WORKER_DB_PASSWORD, REDIS_PASSWORD y RECEIPTS_SECRET_KEY propias (.env.prod.example)" >&2
+          exit 1
+        fi
+        exec alembic upgrade head
+    environment:
+      <<: *app-env
+      MIGRATIONS_DATABASE_URL: postgresql+psycopg://moneymap:${POSTGRES_PASSWORD:-moneymap}@db:5432/moneymap
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-moneymap}
+      API_DB_PASSWORD: ${API_DB_PASSWORD:-moneymap}
+      WORKER_DB_PASSWORD: ${WORKER_DB_PASSWORD:-moneymap}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      RECEIPTS_SECRET_KEY: ${RECEIPTS_SECRET_KEY:-moneymap-dev}
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # El usuario de la API (sujeto a la RLS) con la clave de API_DB_PASSWORD.
+  api-role:
+    image: postgres:16
+    restart: "no"
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD:-moneymap}
+      API_DB_PASSWORD: ${API_DB_PASSWORD:-moneymap}
+      WORKER_DB_PASSWORD: ${WORKER_DB_PASSWORD:-moneymap}
+    command: >-
+      sh -c 'psql -h db -U moneymap -d moneymap -v ON_ERROR_STOP=1
+      -v api_password="$$API_DB_PASSWORD" -f /db/deploy/api_role.sql &&
+      psql -h db -U moneymap -d moneymap -v ON_ERROR_STOP=1
+      -v worker_password="$$WORKER_DB_PASSWORD" -f /db/deploy/worker_role.sql'
+    volumes:
+      - ./db:/db:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  api:
+    <<: *app
+    volumes:
+      - voice-audio:/voice-audio
+    ports:
+      - "127.0.0.1:${API_PORT:-8000}:8080"
+    depends_on:
+      api-role:
+        condition: service_completed_successfully
+      redis:
+        condition: service_started
+      receipts:
+        condition: service_started
+
+  worker:
+    <<: *app
+    environment:
+      <<: *app-env
+      # El worker de voz lee las rutas y escribe ai.calls con su propio usuario.
+      WORKER_DATABASE_URL: postgresql+asyncpg://moneymap_worker_login:${WORKER_DB_PASSWORD:-moneymap}@db:5432/moneymap
+      # La IA de docker-compose.ai.yml: en el mismo servidor, por la red
+      # moneymap-ai; en otro, AI_STT_URL y AI_LLM_URL con su IP privada. No leen
+      # STT_BASE_URL del .env: esa es la del worker con uv, en 127.0.0.1.
+      STT_BASE_URL: ${AI_STT_URL:-http://stt:8090}
+      LLM_BASE_URL: ${AI_LLM_URL:-http://llm:11434}
+    # Para el Ollama de escritorio de la laptop (AI_LLM_URL en .env.example).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - voice-audio:/voice-audio
+    networks:
+      - default
+      - moneymap-ai
+    # Beat guarda su calendario en /tmp: el usuario del contenedor no escribe en /srv.
+    command: celery -A app.workers worker --beat --loglevel=info --schedule /tmp/celerybeat-schedule
+    depends_on:
+      api-role:
+        condition: service_completed_successfully
+      redis:
+        condition: service_started
+
+# La comparte docker-compose.ai.yml cuando corre en el mismo servidor. Nombre
+# fijo y sin `external`: la crea el compose que arranque primero.
+networks:
+  moneymap-ai:
+    name: moneymap-ai
+
+volumes:
+  pgdata:
+  redisdata:
+  # Las fotos de los comprobantes: entran en el respaldo junto con pgdata.
+  receipts:
+  # El audio de los dictados, de la API al worker: en memoria, nunca en disco, y
+  # solo hasta que el worker lo lee (spec 012, RF-10). 2 MB por audio.
+  # ponytail: un audio cuyo dictado nunca se procesa queda hasta el próximo reinicio;
+  # con 64 MB entran 32 en espera, que alcanza con un worker al día.
+  voice-audio:
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=64m,uid=10001,mode=0700

@@ -1,0 +1,61 @@
+[project]
+name = "moneymap-back"
+version = "0.1.0"
+description = "API de MoneyMap: finanzas personales para iOS, Android y web"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic-settings>=2.6",
+    "sqlalchemy[asyncio]>=2.0.36",
+    "asyncpg>=0.30",
+    "psycopg[binary]>=3.2",   # solo para Alembic: aplica los .sql de db/migrations con varias sentencias
+    "alembic>=1.14",
+    "celery[redis]>=5.4",
+    "argon2-cffi>=25.1.0",
+    "pyjwt>=2.15.1",
+    "redis>=6.4.0",
+    "joserfc>=1.7.5",
+    "httpx>=0.28",
+    "minio>=7.2.20",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.8",
+    "mypy>=1.13",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+extend-exclude = ["db"]   # SQL y herramientas de documentación de la base
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "S", "ASYNC"]
+ignore = ["S101"]   # assert en las pruebas
+
+[tool.ruff.lint.per-file-ignores]
+"alembic/**" = ["S608"]
+
+[tool.mypy]
+strict = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["celery.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+# Un solo bucle para toda la corrida: el engine de SQLAlchemy guarda conexiones
+# de asyncpg en su pool y no se pueden reusar desde otro bucle.
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff.lint.isort]
+known-third-party = ["alembic"]   # la carpeta alembic/ no es el paquete
